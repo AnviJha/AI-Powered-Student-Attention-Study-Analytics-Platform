@@ -1,6 +1,12 @@
 # AI-Powered Student Attention & Study Analytics Platform
 
-This repository documentation package is the implementation brief for Codex and the development team.
+This repository contains the Phase 1 presentation frontend and its project documentation.
+
+## Run the UI
+
+Requires Node.js and npm. Run `npm install`, then `npm run dev` and open the local URL shown by Vite. Use `npm run build` to create a production build in `dist/`.
+
+The app is a React, Tailwind CSS, and Recharts demo. All metrics and recommendations come from `src/data.js`. Session controls, challenges, goals, and settings use local page state and reset on reload. No backend or camera access is required.
 
 ## Immediate objective
 
@@ -24,5 +30,5 @@ The platform estimates attention from observable behavior. It cannot directly me
 
 ## Current implementation status
 
-No source-code repository was included with this documentation request. Therefore, no existing implementation, dependencies, routes, or code conventions have been verified. Codex should inspect the target repository before making changes and preserve any existing working code.
+The repository initially contained documentation only. Phase 1 now includes the frontend presentation demo. Later phases remain unimplemented.
 # AI-Powered-Student-Attention-Study-Analytics-Platform
