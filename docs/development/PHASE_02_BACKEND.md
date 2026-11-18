@@ -2,7 +2,7 @@
 
 ## Objective and status
 
-ACTIVE, partial. Establish authenticated study records and honest analytics that the existing UI can consume. Do not create visual scores, AI responses, or production XP from demo fixtures.
+ACTIVE, implementation complete with browser acceptance pending. The local MongoDB integration test and isolated suite pass. Do not create visual scores, AI responses, or production XP from demo fixtures.
 
 ## Scope and features
 
@@ -27,17 +27,18 @@ Users have a unique email index. Sessions and records index `user_id` and time/s
 
 ## Testing, acceptance, and risks
 
-Current isolated result: 5 tests passed with `mongomock`; this does not prove MongoDB connectivity. Exit requires a real MongoDB API run, frontend live/demo flow, authorization and validation tests, and accurate analytics with empty/missing-signal behavior. Risks: client-reported signals can be forged; heuristic weights are not validated; session time depends on server clock; browser storage for JWT needs a deliberate policy.
+Current results: 7 isolated tests passed with `mongomock`; the opt-in real MongoDB test passed against local MongoDB Community 8.0.34. The frontend build passes. `npm audit --omit=dev` found no runtime dependency advisories; the full audit reports four high advisories in the Vite development dependency chain, and its suggested forced fix would downgrade Vite. Exit still requires browser interaction, responsive, and error-state QA; the Browser access host was unavailable during this run. Risks: client-reported signals can be forged; heuristic weights are not validated; session time depends on server clock; JWTs are held only in memory and expire after 12 hours. See [data and trust contract](PHASE_02_DATA_CONTRACT.md).
 
 ## Checklist
 
 - [x] FastAPI, configuration, indexes, JWT, profile, sessions and owned record endpoints.
 - [x] Digital engagement separated from visual attention; focus-plan fallback and reasons.
 - [x] Isolated service and API tests.
-- [ ] Real MongoDB test and connection/error handling.
-- [ ] Frontend auth and live-data adapter.
-- [ ] Analytics calendar/timezone and focused-time rules.
-- [ ] Full failure-path and security review.
+- [x] Real MongoDB test and connection/error handling.
+- [x] Frontend auth and recorded-data mode for Dashboard, Study Session, Analytics, and Settings.
+- [x] Calendar/timezone aggregation and explicit unavailable focused-time contract.
+- [x] Expanded failure-path, ownership, and token tests; local configuration review.
+- [ ] Browser interaction, responsive, and error-state QA.
 
 Depends on Phase 1 UI contracts. Phase 3 can begin only after consent and derived-signal contracts are documented.
 

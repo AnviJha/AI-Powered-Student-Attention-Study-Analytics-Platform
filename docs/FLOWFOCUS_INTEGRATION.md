@@ -1,5 +1,7 @@
 # FlowFocus integration assessment
 
+Phase 3 browser-local face detection uses Google's MediaPipe assets, not FlowFocus source. Its provisional visual-signal index stays separate from the FlowFocus-inspired digital engagement and focus-planning heuristics. See [MediaPipe asset provenance](MEDIAPIPE_ASSETS.md).
+
 ## Repository and permission
 
 `dummy/` was a separate FlowFocus checkout with `app/api`, `app/core`, `app/models`, `app/services`, and `tests`. The main project initially had a Vite React UI, `src/data.js` fixtures, and no backend. FlowFocus had no tracked LICENSE file or README license grant. On 2026-11-18 the project owner stated the code belongs to a group-project collaborator and expressly authorized its use for this project. This is the basis for the selected adaptations. After assessment, the owner requested deletion of `/dummy`; it has been removed and is not a runtime dependency. Attribution is recorded in adapted module docstrings and this document. If the group later adds a formal license or notice, preserve its conditions.
@@ -37,10 +39,10 @@ FlowFocus's course, lesson, progress, practice, and quiz models/routes are inten
 
 FlowFocus mixes mouse, keyboard, tab, inactivity, optional face/blink, lesson, and quiz signals into one `interaction_score` and also exposes it as `attention_score`. This project maintains three separate concepts: `digital_engagement_score` (Phase 2 heuristic), `visual_attention_score` (unavailable until Phase 3), and `combined_study_engagement` (unavailable until a calibrated combination exists). `null` means unavailable, not zero. The Phase 2 focus plan uses digital scores and labels its `score_source`; later visual-history planning must be reviewed independently.
 
-All new records include a user ID and an owned session ID. Times are UTC, durations seconds. The API stores no raw webcam video. Digital activity and distraction events are client reported and can be forged, so they are not validated attention or rewards. A live frontend view is isolated under **Recorded workspace**; original screens still use mock data and keep their demo labels.
+All new records include a user ID and an owned session ID. Times are UTC, durations seconds, and analytics group by the user's configured calendar time zone. The API stores no raw webcam video. Digital activity and distraction events are client reported and can be forged, so they are not validated attention or rewards. The frontend has an explicit mode switch: Dashboard, Study Session, Analytics, and Settings show recorded data in live mode and labeled fixtures in demo mode; Coach, Goals, and Achievements remain demos.
 
 ## Dependencies, tests, and outstanding work
 
-Backend runtime dependencies: FastAPI, Uvicorn, PyMongo, python-jose with cryptography, bcrypt, email-validator. Test dependencies: pytest, httpx, mongomock. No Gemini, OpenCV, MediaPipe, YOLO, or ML dependency was added. Existing React dependencies remain unchanged.
+Backend runtime dependencies: FastAPI, Uvicorn, PyMongo, python-jose with cryptography, bcrypt, email-validator, python-dotenv, and tzdata. Test dependencies: pytest, httpx, mongomock. No Gemini, OpenCV, MediaPipe, YOLO, or ML dependency was added. Existing React dependencies remain unchanged.
 
-`python -m pytest -q` in `backend/`: 5 passed using `mongomock`. `npm run build`: passed, with a bundle-size warning. These results do not prove a real MongoDB connection, browser interactions, or responsive visual quality. Next work: real MongoDB verification, frontend live-mode browser QA, stronger API boundary tests, timezone-aware calendar analytics, and focused-time rules after valid visual signals exist. See [Phase 2](development/PHASE_02_BACKEND.md).
+`python -m pytest -q` in `backend/`: 7 passed, 1 opt-in real-Mongo test skipped. `python backend/scripts/run_real_mongo_check.py`: 1 passed against local MongoDB Community Server 8.0.34, including an index and duplicate-email check. `npm run build`: passed, with a bundle-size warning. Browser interaction and responsive visual QA remain unverified because the tagged Browser access host was unavailable. Validated visual signals and focused-time rules belong to Phase 3. See [Phase 2](development/PHASE_02_BACKEND.md) and the [data contract](development/PHASE_02_DATA_CONTRACT.md).

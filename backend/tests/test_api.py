@@ -1,7 +1,10 @@
 import os
 import mongomock
 import pytest
+from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
+from jose import jwt
+from pymongo.errors import ServerSelectionTimeoutError
 
 from app.main import app, get_db
 
@@ -30,6 +33,12 @@ def test_auth_profile_and_validation(client):
     assert client.patch("/api/profile", headers=headers, json={"daily_goal_minutes": 10}).status_code == 422
     assert client.patch("/api/profile", headers=headers, json={"daily_goal_minutes": 180}).json()["daily_goal_minutes"] == 180
     assert client.post("/api/auth/login", json={"email":"one@example.com", "password":"wrong"}).status_code == 401
+    assert client.patch("/api/profile", headers=headers, json={"time_zone":"Not/AZone"}).status_code == 422
+    assert client.patch("/api/profile", headers=headers, json={"time_zone":"Asia/Kolkata"}).json()["time_zone"] == "Asia/Kolkata"
+    assert client.post("/api/auth/register", json={"name":"Again", "email":"one@example.com", "password":"password1234"}).status_code == 409
+    expired = jwt.encode({"sub": client.get("/api/profile", headers=headers).json()["id"],
+                          "exp": datetime.now(timezone.utc) - timedelta(seconds=1)}, os.environ["JWT_SECRET"], algorithm="HS256")
+    assert client.get("/api/profile", headers={"Authorization": f"Bearer {expired}"}).status_code == 401
 
 
 def test_owned_sessions_records_and_empty_analytics(client):
@@ -39,6 +48,7 @@ def test_owned_sessions_records_and_empty_analytics(client):
     started = client.post("/api/sessions", headers=a, json={"subject":"Algebra", "topic":"Matrices", "goal_minutes":45})
     assert started.status_code == 201, started.text
     sid = started.json()["id"]
+    assert client.post("/api/sessions", headers=a, json={"subject":"Another"}).status_code == 409
     assert client.get(f"/api/sessions/{sid}", headers=b).status_code == 404
     assert client.post(f"/api/sessions/{sid}/digital-records", headers=b, json={}).status_code == 404
     recorded = client.post(f"/api/sessions/{sid}/digital-records", headers=a, json={"mouse_moves":100})
@@ -59,3 +69,12 @@ def test_owned_sessions_records_and_empty_analytics(client):
     assert client.post(f"/api/sessions/{sid}/digital-records", headers=a, json={"idle_seconds":-1}).status_code == 422
     assert client.post(f"/api/sessions/{sid}/distractions", headers=a, json={"category":"diagnosis"}).status_code == 422
     assert client.get("/api/analytics?period=yearly", headers=a).status_code == 422
+    assert client.get(f"/api/sessions/{sid}/attention-records", headers=b).status_code == 404
+    assert client.get("/api/analytics", headers=b).json()["session_count"] == 0
+
+
+def test_database_failure_returns_503(client):
+    app.dependency_overrides[get_db] = lambda: (_ for _ in ()).throw(ServerSelectionTimeoutError("offline"))
+    response = client.post("/api/auth/login", json={"email":"one@example.com", "password":"password1234"})
+    assert response.status_code == 503
+    assert response.json() == {"detail":"Database unavailable"}

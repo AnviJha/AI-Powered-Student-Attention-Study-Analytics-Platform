@@ -36,3 +36,16 @@ def test_analytics_empty_and_missing_visual():
     assert report["average_digital_engagement_score"] == 72
     assert report["estimated_focused_seconds"] is None
 
+
+def test_calendar_boundaries_use_profile_time_zone():
+    # 00:30 in Kolkata on Nov 18 is still Nov 17 in UTC.
+    now = datetime(2026, 11, 17, 19, 0, tzinfo=timezone.utc)
+    inside = {"_id": ObjectId(), "subject": "Physics", "started_at": datetime(2026, 11, 17, 18, 45, tzinfo=timezone.utc), "active_seconds": 300}
+    outside = {"_id": ObjectId(), "subject": "Math", "started_at": datetime(2026, 11, 17, 18, 20, tzinfo=timezone.utc), "active_seconds": 200}
+    daily = summarize([inside, outside], [], [], now=now, time_zone="Asia/Kolkata")
+    assert daily["session_count"] == 1
+    assert daily["by_day"][0]["date"] == "2026-11-18"
+    assert daily["period_start"] == "2026-11-17T18:30:00+00:00"
+    assert summarize([inside, outside], [], [], "weekly", now, "Asia/Kolkata")["session_count"] == 2
+    assert summarize([inside, outside], [], [], "monthly", now, "Asia/Kolkata")["session_count"] == 2
+

@@ -2,6 +2,8 @@
 import os
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import bcrypt
 from bson import ObjectId
@@ -10,14 +12,17 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError, PyMongoError
+from dotenv import load_dotenv
 
 from app.services.analytics import summarize
 from app.services.engagement import score_digital
 from app.services.planner import recommend_plan, break_check
+from app.services.visual import ALGORITHM_VERSION, summarize_visual_window
 
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 app = FastAPI(title="Student Study Analytics API", version="0.1.0")
 
 
@@ -27,7 +32,7 @@ async def database_unavailable(_request: Request, _error: PyMongoError):
 
 app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in os.getenv(
     "CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if x.strip()],
-    allow_credentials=False, allow_methods=["GET", "POST", "PATCH"], allow_headers=["Authorization", "Content-Type"])
+    allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type"])
 bearer = HTTPBearer()
 
 
@@ -43,12 +48,17 @@ def get_client():
     return MongoClient(uri, tz_aware=True, serverSelectionTimeoutMS=3000)
 
 
+@lru_cache
 def get_db():
     db = get_client()[os.getenv("MONGO_DB", "study_attention")]
     db.users.create_index("email", unique=True)
     db.sessions.create_index([("user_id", ASCENDING), ("started_at", ASCENDING)])
+    db.sessions.create_index([("user_id", ASCENDING)], unique=True, name="one_open_session_per_user",
+                             partialFilterExpression={"status": {"$in": ["active", "paused"]}})
     db.attention_records.create_index([("user_id", ASCENDING), ("session_id", ASCENDING), ("captured_at", ASCENDING)])
     db.distractions.create_index([("user_id", ASCENDING), ("session_id", ASCENDING), ("occurred_at", ASCENDING)])
+    db.visual_records.create_index([("user_id", ASCENDING), ("session_id", ASCENDING), ("captured_at", ASCENDING)])
+    db.visual_records.create_index("expires_at", expireAfterSeconds=0)
     return db
 
 
@@ -110,7 +120,7 @@ class Register(BaseModel):
 
 class Login(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1, max_length=72)
 
 
 class ProfileUpdate(BaseModel):
@@ -118,6 +128,17 @@ class ProfileUpdate(BaseModel):
     daily_goal_minutes: int | None = Field(default=None, ge=30, le=720)
     preferred_session_minutes: int | None = Field(default=None, ge=10, le=180)
     notifications_enabled: bool | None = None
+    time_zone: str | None = Field(default=None, max_length=64)
+
+    @field_validator("time_zone")
+    @classmethod
+    def valid_time_zone(cls, value):
+        if value is not None:
+            try:
+                ZoneInfo(value)
+            except ZoneInfoNotFoundError:
+                raise ValueError("Unknown IANA time zone") from None
+        return value
 
 
 class SessionCreate(BaseModel):
@@ -135,15 +156,31 @@ class DigitalSnapshot(BaseModel):
 
 
 class DistractionCreate(BaseModel):
-    category: str = Field(pattern="^(looking_away|face_absent|phone_signal|tab_hidden|idle|other)$")
+    category: str = Field(pattern="^(tab_hidden|idle|other)$")
     detail: str | None = Field(default=None, max_length=200)
+
+
+class VisualWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    algorithm_version: str = Field(pattern="^face-presence-head-orientation-v1$")
+    total_samples: int = Field(ge=0, le=50)
+    valid_samples: int = Field(ge=0, le=50)
+    face_samples: int = Field(ge=0, le=50)
+    forward_samples: int = Field(ge=0, le=50)
+
+    @model_validator(mode="after")
+    def nested_counts(self):
+        if not (self.forward_samples <= self.face_samples <= self.valid_samples <= self.total_samples):
+            raise ValueError("Sample counts must be nested")
+        return self
 
 
 def public_user(user):
     return {"id": str(user["_id"]), "name": user["name"], "email": user["email"],
             "daily_goal_minutes": user.get("daily_goal_minutes", 240),
             "preferred_session_minutes": user.get("preferred_session_minutes", 45),
-            "notifications_enabled": user.get("notifications_enabled", True)}
+            "notifications_enabled": user.get("notifications_enabled", True),
+            "time_zone": user.get("time_zone", "UTC")}
 
 
 def token_for(user):
@@ -155,12 +192,19 @@ def health():
     return {"status": "ok", "phase": 2}
 
 
+@app.get("/api/health/db")
+def database_health(db=Depends(get_db)):
+    db.command("ping")
+    return {"status": "ok", "database": db.name}
+
+
 @app.post("/api/auth/register", status_code=201)
 def register(body: Register, db=Depends(get_db)):
+    secret()
     doc = {"name": body.name.strip(), "email": body.email.lower(),
            "password_hash": bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode(),
            "daily_goal_minutes": 240, "preferred_session_minutes": 45,
-           "notifications_enabled": True, "created_at": utcnow()}
+           "notifications_enabled": True, "time_zone": "UTC", "created_at": utcnow()}
     if not doc["name"]:
         raise HTTPException(422, "Name cannot be blank")
     try:
@@ -185,7 +229,7 @@ def profile(user=Depends(current_user)):
 
 @app.patch("/api/profile")
 def update_profile(body: ProfileUpdate, user=Depends(current_user), db=Depends(get_db)):
-    changes = body.model_dump(exclude_unset=True)
+    changes = body.model_dump(exclude_unset=True, exclude_none=True)
     if "name" in changes and not changes["name"].strip():
         raise HTTPException(422, "Name cannot be blank")
     if changes:
@@ -197,11 +241,16 @@ def update_profile(body: ProfileUpdate, user=Depends(current_user), db=Depends(g
 def start_session(body: SessionCreate, user=Depends(current_user), db=Depends(get_db)):
     if not body.subject.strip():
         raise HTTPException(422, "Subject cannot be blank")
+    if db.sessions.find_one({"user_id": str(user["_id"]), "status": {"$in": ["active", "paused"]}}):
+        raise HTTPException(409, "Finish your open session before starting another")
     now = utcnow()
     doc = {"user_id": str(user["_id"]), "subject": body.subject.strip(), "topic": body.topic,
            "goal_minutes": body.goal_minutes, "status": "active", "started_at": now,
            "active_since": now, "active_seconds": 0, "ended_at": None}
-    doc["_id"] = db.sessions.insert_one(doc).inserted_id
+    try:
+        doc["_id"] = db.sessions.insert_one(doc).inserted_id
+    except DuplicateKeyError:
+        raise HTTPException(409, "Finish or resume your open session before starting another") from None
     return session_out(doc)
 
 
@@ -228,11 +277,11 @@ def change_session(session_id: str, action: str, user=Depends(current_user), db=
     if session["status"] == "active":
         updates["active_seconds"] = session.get("active_seconds", 0) + max(0, int((now - session["active_since"]).total_seconds()))
     if action == "pause":
-        updates.update(status="paused", active_since=None)
+        updates.update(status="paused", active_since=None, visual_consent_active=False)
     elif action == "resume":
         updates.update(status="active", active_since=now)
     else:
-        updates.update(status="ended", active_since=None, ended_at=now)
+        updates.update(status="ended", active_since=None, ended_at=now, visual_consent_active=False)
     result = db.sessions.find_one_and_update(
         {"_id": session["_id"], "user_id": str(user["_id"]), "status": session["status"]},
         {"$set": updates}, return_document=True)
@@ -264,6 +313,62 @@ def attention_records(session_id: str, user=Depends(current_user), db=Depends(ge
                  {"user_id": str(user["_id"]), "session_id": session_id}).sort("captured_at", 1).limit(1000)]
 
 
+@app.post("/api/sessions/{session_id}/visual-consent")
+def start_visual_consent(session_id: str, user=Depends(current_user), db=Depends(get_db)):
+    session = owned_session(db, user, session_id)
+    if session["status"] != "active":
+        raise HTTPException(409, "Session is not active")
+    now = utcnow()
+    result = db.sessions.update_one({"_id": session["_id"], "user_id": str(user["_id"]), "status": "active"},
+                                    {"$set": {"visual_consent_active": True, "visual_consent_at": now}})
+    if not result.matched_count:
+        raise HTTPException(409, "Session changed; retry")
+    return {"active": True, "consented_at": now.isoformat()}
+
+
+@app.delete("/api/sessions/{session_id}/visual-consent")
+def revoke_visual_consent(session_id: str, user=Depends(current_user), db=Depends(get_db)):
+    session = owned_session(db, user, session_id)
+    db.sessions.update_one({"_id": session["_id"], "user_id": str(user["_id"])},
+                           {"$set": {"visual_consent_active": False, "visual_revoked_at": utcnow()}})
+    return {"active": False}
+
+
+@app.post("/api/sessions/{session_id}/visual-records", status_code=201)
+def add_visual_record(session_id: str, body: VisualWindow, user=Depends(current_user), db=Depends(get_db)):
+    session = owned_session(db, user, session_id)
+    if session["status"] != "active" or not session.get("visual_consent_active"):
+        raise HTTPException(409, "Active session and visual consent required")
+    now = utcnow()
+    last = db.visual_records.find_one({"user_id": str(user["_id"]), "session_id": session_id},
+                                      sort=[("captured_at", -1)])
+    if last and (now - last["captured_at"]).total_seconds() < 8:
+        raise HTTPException(429, "Visual windows must be at least 8 seconds apart")
+    scored = summarize_visual_window(body.total_samples, body.valid_samples,
+                                     body.face_samples, body.forward_samples)
+    doc = {"user_id": str(user["_id"]), "session_id": session_id, "captured_at": now,
+           "expires_at": now + timedelta(days=90), **body.model_dump(), **scored}
+    db.visual_records.insert_one(doc)
+    return {"captured_at": now.isoformat(), **scored, "algorithm_version": ALGORITHM_VERSION,
+            "visual_attention_score": None}
+
+
+@app.get("/api/sessions/{session_id}/visual-records")
+def visual_records(session_id: str, user=Depends(current_user), db=Depends(get_db)):
+    owned_session(db, user, session_id)
+    return [{"captured_at": r["captured_at"].isoformat(), "visual_signal_index": r["visual_signal_index"],
+             "quality": r["quality"], "reasons": r["reasons"], "algorithm_version": r["algorithm_version"]}
+            for r in db.visual_records.find({"user_id": str(user["_id"]), "session_id": session_id})
+            .sort("captured_at", -1).limit(100)]
+
+
+@app.delete("/api/sessions/{session_id}/visual-records")
+def delete_visual_records(session_id: str, user=Depends(current_user), db=Depends(get_db)):
+    owned_session(db, user, session_id)
+    result = db.visual_records.delete_many({"user_id": str(user["_id"]), "session_id": session_id})
+    return {"deleted_count": result.deleted_count}
+
+
 @app.post("/api/sessions/{session_id}/distractions", status_code=201)
 def add_distraction(session_id: str, body: DistractionCreate, user=Depends(current_user), db=Depends(get_db)):
     session = owned_session(db, user, session_id)
@@ -286,7 +391,7 @@ def analytics(period: str = Query(default="daily", pattern="^(daily|weekly|month
         if session["status"] == "active" and session.get("active_since"):
             session["active_seconds"] = session.get("active_seconds", 0) + max(0, int((utcnow() - session["active_since"]).total_seconds()))
     return summarize(sessions, list(db.attention_records.find(query)),
-                     list(db.distractions.find(query)), period)
+                     list(db.distractions.find(query)), period, time_zone=user.get("time_zone", "UTC"))
 
 
 @app.get("/api/focus/plan")
